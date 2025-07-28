@@ -1,4 +1,4 @@
-use near_sdk::{near, AccountId, CryptoHash, NearToken, Timestamp};
+use near_sdk::{near, AccountId, CryptoHash, NearToken};
 
 use crate::timelocks::TimelockDelays;
 
@@ -21,8 +21,8 @@ pub enum Asset {
 pub struct Escrow {
     // Core HTLC parameters
     pub hashlock: CryptoHash,
-    pub maker: AccountId,          // The initiator of the swap (the user)
-    pub taker: AccountId,          // The party filling the swap (the resolver)
+    pub maker: AccountId, // The initiator of the swap (the user)
+    pub taker: AccountId, // The party filling the swap (the resolver)
     pub asset: Asset,
     pub amount: NearToken,
 
@@ -31,8 +31,8 @@ pub struct Escrow {
 
     // Incentives & State
     pub safety_deposit: NearToken,
-    pub claimed: bool,          // Flag to prevent double-spends before deletion
-    pub is_source: bool,       // Flag to distinguish swap direction
+    pub claimed: bool,   // Flag to prevent double-spends before deletion
+    pub is_source: bool, // Flag to distinguish swap direction
 }
 
 // Message for ft_on_transfer to initiate an FT swap

@@ -1,17 +1,17 @@
-use near_sdk::{env, bs58, near, require, AccountId, NearToken, Promise, PromiseOrValue, PromiseResult, Timestamp, assert_one_yocto};
-use near_sdk::base64::{engine::general_purpose::STANDARD, Engine as _};
-use near_sdk::store::IterableMap;
 use near_sdk::json_types::{Base58CryptoHash, U128};
+use near_sdk::store::IterableMap;
+use near_sdk::{
+    base64, bs58, env, near, require, serde_json, AccountId, NearToken, Promise, PromiseOrValue,
+    PromiseResult,
+};
 
 mod escrow;
-mod utils;
 mod timelocks;
+mod utils;
 
-use escrow::{Escrow, EscrowId, Asset};
-use timelocks::{Timelocks, TimelockDelays};
-use utils::{log_escrow_event};
-
-use crate::escrow::FtOnTransferMsg;
+use escrow::{Asset, Escrow, EscrowId, FtOnTransferMsg};
+use timelocks::{TimelockDelays, Timelocks};
+use utils::log_escrow_event;
 
 // External contract interfaces
 #[near_sdk::ext_contract(ext_fungible_token)]
@@ -63,19 +63,23 @@ impl Contract {
         safety_deposit: NearToken,
         is_source: bool,
     ) {
-        // --- Re-ordered for clarity and security ---
-        
         // 1. Validate the timelock configuration first.
         timelocks.validate();
 
         // 2. Derive the swap amount from the attached deposit.
         let attached_deposit = env::attached_deposit();
         let amount = attached_deposit.saturating_sub(safety_deposit);
-        require!(amount.as_yoctonear() > 0, "Deposit must be greater than safety_deposit");
+        require!(
+            amount.as_yoctonear() > 0,
+            "Deposit must be greater than safety_deposit"
+        );
 
         // 3. Check for hashlock collision.
         let hashlock_bytes: EscrowId = hashlock.into();
-        require!(!self.escrows.contains_key(&hashlock_bytes), "Escrow with this hashlock already exists");
+        require!(
+            !self.escrows.contains_key(&hashlock_bytes),
+            "Escrow with this hashlock already exists"
+        );
 
         // 4. Construct the Escrow object.
         let maker = env::predecessor_account_id();
@@ -90,7 +94,7 @@ impl Contract {
             timelocks: Timelocks::new(env::block_timestamp(), timelocks),
             claimed: false,
         };
-        
+
         // 5. Save the escrow.
         self.escrows.insert(hashlock_bytes, escrow);
 
@@ -100,7 +104,7 @@ impl Contract {
     /// NEP-141 Receiver: Initiates an escrow with a Fungible Token.
     ///
     /// To escrow a Fungible Token (like wNEAR or USDC), the user (or resolver script acting on their behalf)
-    /// does not call the contract directly. Instead, they execute a single transaction by calling 
+    /// does not call the contract directly. Instead, they execute a single transaction by calling
     /// the ft_transfer_call function on the token contract itself.
     ///
     /// This function is called by a token contract when a user executes `ft_transfer_call`.
@@ -123,22 +127,28 @@ impl Contract {
     ) -> PromiseOrValue<U128> {
         // 1. Get the token contract that called this function (the asset being transferred).
         let token_contract_id = env::predecessor_account_id();
-        
+
         // 2. Deserialize the message from the user.
-        let ft_msg: FtOnTransferMsg = serde_json::from_str(&msg)
-            .expect("Invalid FtOnTransferMsg format");
+        let ft_msg: FtOnTransferMsg =
+            serde_json::from_str(&msg).expect("Invalid FtOnTransferMsg format");
 
         // 3. Validate the timelock configuration.
         ft_msg.timelocks.validate();
 
         // 4. Verify the native NEAR safety deposit attached to the call.
         let safety_deposit = env::attached_deposit();
-        require!(safety_deposit.as_yoctonear() > 0, "A native NEAR safety deposit must be attached");
+        require!(
+            safety_deposit.as_yoctonear() > 0,
+            "A native NEAR safety deposit must be attached"
+        );
 
         // 5. Check for hashlock collision.
         let hashlock_bytes: EscrowId = ft_msg.hashlock.into();
-        require!(!self.escrows.contains_key(&hashlock_bytes), "Escrow with this hashlock already exists");
-        
+        require!(
+            !self.escrows.contains_key(&hashlock_bytes),
+            "Escrow with this hashlock already exists"
+        );
+
         // 6. Construct the Escrow object.
         let escrow = Escrow {
             hashlock: hashlock_bytes,
@@ -151,34 +161,47 @@ impl Contract {
             timelocks: Timelocks::new(env::block_timestamp(), ft_msg.timelocks),
             claimed: false,
         };
-        
+
         // 7. Save the escrow to state.
         self.escrows.insert(hashlock_bytes, escrow);
 
-        log_escrow_event("INITIATED_FT", &hashlock_bytes, &sender_id, NearToken::from_yoctonear(amount.0));
-        
+        log_escrow_event(
+            "INITIATED_FT",
+            &hashlock_bytes,
+            &sender_id,
+            NearToken::from_yoctonear(amount.0),
+        );
+
         // 8. Return U128(0) to indicate we've consumed the tokens and aren't returning any.
         PromiseOrValue::Value(U128(0))
     }
 
     pub fn withdraw(&mut self, secret: String) -> Promise {
-        let secret_bytes = STANDARD::decode(secret).expect("Invalid base64 secret");
+        let secret_bytes = base64::decode(secret).expect("Invalid base64 secret");
         let hashlock_bytes: EscrowId = env::sha256_array(&secret_bytes);
 
-        let mut escrow = self.escrows.get(&hashlock_bytes).cloned().expect("Escrow not found");
+        let mut escrow = self
+            .escrows
+            .get(&hashlock_bytes)
+            .cloned()
+            .expect("Escrow not found");
 
         require!(!escrow.claimed, "Escrow already claimed");
 
         let is_public_caller = env::predecessor_account_id() != escrow.taker;
 
         if escrow.is_source {
-            escrow.timelocks.assert_src_withdrawal_window(is_public_caller)
-        } else { 
-            escrow.timelocks.assert_dst_withdrawal_window(is_public_caller)
+            escrow
+                .timelocks
+                .assert_src_withdrawal_window(is_public_caller)
+        } else {
+            escrow
+                .timelocks
+                .assert_dst_withdrawal_window(is_public_caller)
         }
 
         escrow.claimed = true;
-        self.escrows.insert(hashlock_bytes, escrow);
+        self.escrows.insert(hashlock_bytes, escrow.clone());
 
         let caller = env::predecessor_account_id();
         let recipient = if escrow.is_source {
@@ -191,7 +214,11 @@ impl Contract {
             Asset::Native => Promise::new(recipient).transfer(escrow.amount),
             Asset::Ft(token_id) => ext_fungible_token::ext(token_id)
                 .with_static_gas(env::prepaid_gas().saturating_div(4))
-                .ft_transfer(recipient, U128(escrow.amount.as_yoctonear()), Some("1inch Fusion+ Swap".to_string())),
+                .ft_transfer(
+                    recipient,
+                    U128(escrow.amount.as_yoctonear()),
+                    Some("1inch Fusion+ Swap".to_string()),
+                ),
         };
 
         let safety_deposit_transfer = Promise::new(caller.clone()).transfer(escrow.safety_deposit);
@@ -205,22 +232,31 @@ impl Contract {
 
     pub fn cancel(&mut self, hashlock: Base58CryptoHash) -> Promise {
         let hashlock_bytes: EscrowId = hashlock.into();
-        require!(self.escrows.contains_key(&hashlock_bytes), "Escrow not found");
+        require!(
+            self.escrows.contains_key(&hashlock_bytes),
+            "Escrow not found"
+        );
 
-        let mut escrow = self.escrows.get(&hashlock_bytes).cloned().expect("Escrow not found");
+        let mut escrow = self
+            .escrows
+            .get(&hashlock_bytes)
+            .cloned()
+            .expect("Escrow not found");
 
         require!(!escrow.claimed, "Escrow already claimed");
 
         let is_public_caller = env::predecessor_account_id() != escrow.taker;
 
         if escrow.is_source {
-            escrow.timelocks.assert_src_cancellation_window(is_public_caller)
-        } else { 
+            escrow
+                .timelocks
+                .assert_src_cancellation_window(is_public_caller)
+        } else {
             escrow.timelocks.assert_dst_cancellation_window()
         }
 
         escrow.claimed = true;
-        self.escrows.insert(hashlock_bytes, escrow);
+        self.escrows.insert(hashlock_bytes, escrow.clone());
 
         let caller = env::predecessor_account_id();
         let recipient = if escrow.is_source {
@@ -233,13 +269,17 @@ impl Contract {
             Asset::Native => Promise::new(recipient).transfer(escrow.amount),
             Asset::Ft(token_id) => ext_fungible_token::ext(token_id)
                 .with_static_gas(env::prepaid_gas().saturating_div(4))
-                .ft_transfer(recipient, U128(escrow.amount.as_yoctonear()), Some("1inch Fusion+ Swap Cancel".to_string())),
+                .ft_transfer(
+                    recipient,
+                    U128(escrow.amount.as_yoctonear()),
+                    Some("1inch Fusion+ Swap Cancel".to_string()),
+                ),
         };
 
         let safety_deposit_transfer = Promise::new(caller.clone()).transfer(escrow.safety_deposit);
 
         log_escrow_event("CANCELED", &hashlock_bytes, &caller, escrow.amount);
-        
+
         main_transfer
             .and(safety_deposit_transfer)
             .then(ext_self::ext(env::current_account_id()).on_escrow_settled(hashlock_bytes))
@@ -251,14 +291,20 @@ impl Contract {
         if let PromiseResult::Successful(_) = env::promise_result(0) {
             // Both transfers succeeded, we can safely remove the escrow.
             self.escrows.remove(&hashlock);
-            env::log_str(&format!("ESCROW_CLEANUP_SUCCESS: hashlock='{}'", bs58::encode(&hashlock).into_string()));
+            env::log_str(&format!(
+                "ESCROW_CLEANUP_SUCCESS: hashlock='{}'",
+                bs58::encode(&hashlock).into_string()
+            ));
         } else {
             // One or both transfers failed.
             // Revert the `claimed` status to allow another attempt.
             if let Some(mut escrow) = self.escrows.get(&hashlock).cloned() {
                 escrow.claimed = false;
                 self.escrows.insert(hashlock, escrow);
-                env::log_str(&format!("ESCROW_SETTLEMENT_FAILED: Reverted claimed status for hashlock='{}'", bs58::encode(&hashlock).into_string()));
+                env::log_str(&format!(
+                    "ESCROW_SETTLEMENT_FAILED: Reverted claimed status for hashlock='{}'",
+                    bs58::encode(&hashlock).into_string()
+                ));
             }
         }
     }

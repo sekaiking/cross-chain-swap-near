@@ -38,14 +38,26 @@ impl Timelocks {
         let now = env::block_timestamp();
 
         if is_public_caller {
-            let public_withdrawal_start = self.created_at + self.delays.dst_public_withdrawal_delay * NANOS_IN_SEC;
-            require!(now >= public_withdrawal_start, "Public withdrawal period (dst) has not started");
+            let public_withdrawal_start =
+                self.created_at + self.delays.dst_public_withdrawal_delay * NANOS_IN_SEC;
+            require!(
+                now >= public_withdrawal_start,
+                "Public withdrawal period (dst) has not started"
+            );
         } else {
-            let withdrawal_start = self.created_at + self.delays.dst_withdrawal_delay * NANOS_IN_SEC;
-            require!(now >= withdrawal_start, "Private withdrawal period (dst) has not started");
+            let withdrawal_start =
+                self.created_at + self.delays.dst_withdrawal_delay * NANOS_IN_SEC;
+            require!(
+                now >= withdrawal_start,
+                "Private withdrawal period (dst) has not started"
+            );
         }
-        let cancellation_start = self.created_at + self.delays.dst_cancellation_delay * NANOS_IN_SEC;
-        require!(now < cancellation_start, "Cancellation period (dst) has started");
+        let cancellation_start =
+            self.created_at + self.delays.dst_cancellation_delay * NANOS_IN_SEC;
+        require!(
+            now < cancellation_start,
+            "Cancellation period (dst) has started"
+        );
     }
 
     /// Asserts the current time is valid for a `withdrawal` (claim) on the source chain.
@@ -53,21 +65,37 @@ impl Timelocks {
         let now = env::block_timestamp();
 
         if is_public_caller {
-            let public_withdrawal_start = self.created_at + self.delays.src_public_withdrawal_delay * NANOS_IN_SEC;
-            require!(now >= public_withdrawal_start, "Public withdrawal period (src) has not started");
+            let public_withdrawal_start =
+                self.created_at + self.delays.src_public_withdrawal_delay * NANOS_IN_SEC;
+            require!(
+                now >= public_withdrawal_start,
+                "Public withdrawal period (src) has not started"
+            );
         } else {
-            let withdrawal_start = self.created_at + self.delays.src_withdrawal_delay * NANOS_IN_SEC;
-            require!(now >= withdrawal_start, "Private withdrawal period (src) has not started");
+            let withdrawal_start =
+                self.created_at + self.delays.src_withdrawal_delay * NANOS_IN_SEC;
+            require!(
+                now >= withdrawal_start,
+                "Private withdrawal period (src) has not started"
+            );
         }
-        let cancellation_start = self.created_at + self.delays.src_cancellation_delay * NANOS_IN_SEC;
-        require!(now < cancellation_start, "Cancellation period (src) has started");
+        let cancellation_start =
+            self.created_at + self.delays.src_cancellation_delay * NANOS_IN_SEC;
+        require!(
+            now < cancellation_start,
+            "Cancellation period (src) has started"
+        );
     }
 
     /// Asserts the current time is valid for a `cancellation` (refund) on the destination chain.
     pub fn assert_dst_cancellation_window(&self) {
         let now = env::block_timestamp();
-        let cancellation_start = self.created_at + self.delays.dst_cancellation_delay * NANOS_IN_SEC;
-        require!(now >= cancellation_start, "Cancellation period (dst) has not started");
+        let cancellation_start =
+            self.created_at + self.delays.dst_cancellation_delay * NANOS_IN_SEC;
+        require!(
+            now >= cancellation_start,
+            "Cancellation period (dst) has not started"
+        );
     }
 
     /// Asserts the current time is valid for a `cancellation` (refund) on the source chain.
@@ -75,11 +103,19 @@ impl Timelocks {
         let now = env::block_timestamp();
 
         if is_public_caller {
-            let public_cancellation_start = self.created_at + self.delays.src_public_cancellation_delay * NANOS_IN_SEC;
-            require!(now >= public_cancellation_start, "Public cancellation period (src) has not started");
+            let public_cancellation_start =
+                self.created_at + self.delays.src_public_cancellation_delay * NANOS_IN_SEC;
+            require!(
+                now >= public_cancellation_start,
+                "Public cancellation period (src) has not started"
+            );
         } else {
-            let cancellation_start = self.created_at + self.delays.src_cancellation_delay * NANOS_IN_SEC;
-            require!(now >= cancellation_start, "Private cancellation period (src) has not started");
+            let cancellation_start =
+                self.created_at + self.delays.src_cancellation_delay * NANOS_IN_SEC;
+            require!(
+                now >= cancellation_start,
+                "Private cancellation period (src) has not started"
+            );
         }
     }
 }
