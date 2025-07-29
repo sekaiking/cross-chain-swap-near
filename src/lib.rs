@@ -1,27 +1,40 @@
+use near_sdk::env::{log_str, panic_str};
 use near_sdk::json_types::{Base58CryptoHash, U128};
-use near_sdk::store::IterableMap;
+use near_sdk::store::{IterableMap, IterableSet};
 use near_sdk::{
-    base64, bs58, env, near, require, serde_json, AccountId, NearToken, Promise, PromiseOrValue,
-    PromiseResult,
+    base64, bs58, env, ext_contract, log, near, require, serde_json, AccountId, NearToken, Promise,
+    PromiseOrValue, PromiseResult, PublicKey,
 };
 
 mod escrow;
+mod signatures;
 mod timelocks;
 mod utils;
 
-use escrow::{Asset, Escrow, EscrowId, FtOnTransferMsg};
-use timelocks::{TimelockDelays, Timelocks};
+use escrow::{Asset, Escrow, EscrowId};
+use signatures::{verify_maker_signature, SignedOrder};
+use timelocks::Timelocks;
 use utils::log_escrow_event;
 
+use crate::escrow::FtOnTransferMsg;
+
 // External contract interfaces
-#[near_sdk::ext_contract(ext_fungible_token)]
+#[ext_contract(ext_fungible_token)]
 pub trait FungibleToken {
     fn ft_transfer(&mut self, receiver_id: AccountId, amount: U128, memo: Option<String>);
+    fn ft_transfer_from(
+        &mut self,
+        owner_id: AccountId,
+        new_owner_id: AccountId,
+        amount: U128,
+        memo: Option<String>,
+    );
 }
 
-#[near_sdk::ext_contract(ext_self)]
+#[ext_contract(ext_self)]
 pub trait SelfCallbacks {
     fn on_escrow_settled(&mut self, hashlock: EscrowId);
+    fn on_ft_pulled_for_escrow(&mut self, params: SignedOrder, safety_deposit: NearToken);
 }
 
 // Define the contract structure
@@ -30,6 +43,8 @@ pub struct Contract {
     pub owner_id: AccountId,
     // The main collection storing all active escrows, keyed by their EscrowId (secret_hash)
     pub escrows: IterableMap<EscrowId, Escrow>,
+    pub used_nonces: IterableSet<u128>,
+    pub registered_keys: IterableMap<AccountId, Vec<PublicKey>>,
 }
 
 // Define the default, which automatically initializes the contract
@@ -38,6 +53,8 @@ impl Default for Contract {
         Self {
             owner_id: env::predecessor_account_id(),
             escrows: IterableMap::new(b"e"),
+            used_nonces: IterableSet::new(b"n"),
+            registered_keys: IterableMap::new(b"k"),
         }
     }
 }
@@ -50,74 +67,104 @@ impl Contract {
         Self {
             owner_id,
             escrows: IterableMap::new(b"e"),
+            used_nonces: IterableSet::new(b"n"),
+            registered_keys: IterableMap::new(b"k"),
         }
     }
 
-    /// Initiates a escrow with native NEAR.
-    #[payable]
-    pub fn initiate_escrow(
-        &mut self,
-        hashlock: Base58CryptoHash,
-        taker: AccountId,
-        timelocks: TimelockDelays,
-        safety_deposit: NearToken,
-        is_source: bool,
-    ) {
-        // 1. Validate the timelock configuration first.
-        timelocks.validate();
+    /// Allows a user to register a FullAccess public key with the contract.
+    /// This proves they own the key and the account. This is a one-time setup.
+    pub fn register_key(&mut self) {
+        let account_id = env::signer_account_id();
+        let public_key = env::signer_account_pk();
 
-        // 2. Derive the swap amount from the attached deposit.
-        let attached_deposit = env::attached_deposit();
-        let amount = attached_deposit.saturating_sub(safety_deposit);
+        let keys = self.registered_keys.get_mut(&account_id);
+
+        if let Some(keys) = keys {
+            if !keys.contains(&public_key) {
+                keys.push(public_key.clone());
+            }
+        } else {
+            self.registered_keys
+                .insert(account_id.clone(), vec![public_key.clone()]);
+        }
+
+        log_str(&format!(
+            "Registered key {} for account {}",
+            bs58::encode(public_key.as_bytes()).into_string(),
+            account_id,
+        ));
+    }
+
+    /// Creates a SOURCE escrow (e.g., NEAR -> ETH).
+    /// Called by a Resolver who presents a Maker's signed intent.
+    /// The contract pulls tokens from the Maker's account using an allowance.
+    #[payable]
+    pub fn initiate_source_escrow(
+        &mut self,
+        params: SignedOrder,
+        signature: String,
+        public_key: PublicKey,
+    ) -> Promise {
+        let safety_deposit = env::attached_deposit();
         require!(
-            amount.as_yoctonear() > 0,
-            "Deposit must be greater than safety_deposit"
+            safety_deposit.as_yoctonear() > 0,
+            "A native NEAR safety deposit must be attached by the resolver"
         );
 
-        // 3. Check for hashlock collision.
-        let hashlock_bytes: EscrowId = hashlock.into();
+        // Verify the public key is registered for the maker
+        let maker_keys = self
+            .registered_keys
+            .get(&params.maker_id)
+            .expect("No keys registered for this maker");
+        require!(
+            maker_keys.contains(&public_key),
+            "Public key not registered for this maker"
+        );
+
+        // Signature verification & nonce consumption happens inside this function
+        let signature_bytes = base64::decode(&signature).expect("Invalid signature format");
+        verify_maker_signature(
+            &params,
+            &signature_bytes,
+            &public_key,
+            &mut self.used_nonces,
+        );
+
+        // Make sure timelocks are valide dates
+        params.timelocks.validate();
+
+        let hashlock_bytes: EscrowId = params.hashlock.into();
         require!(
             !self.escrows.contains_key(&hashlock_bytes),
             "Escrow with this hashlock already exists"
         );
+        require!(params.is_source, "This function is for source escrows only");
 
-        // 4. Construct the Escrow object.
-        let maker = env::predecessor_account_id();
-        let escrow = Escrow {
-            hashlock: hashlock_bytes,
-            maker: maker.clone(),
-            taker,
-            asset: Asset::Native, // This function ONLY handles Native NEAR.
-            amount,
-            safety_deposit,
-            is_source,
-            timelocks: Timelocks::new(env::block_timestamp(), timelocks),
-            claimed: false,
-        };
-
-        // 5. Save the escrow.
-        self.escrows.insert(hashlock_bytes, escrow);
-
-        log_escrow_event("INITIATED_NATIVE", &hashlock_bytes, &maker, amount);
+        // Trigger the token pull from the Maker's account.
+        ext_fungible_token::ext(params.asset_id.clone())
+            .with_attached_deposit(NearToken::from_yoctonear(1))
+            .with_static_gas(env::prepaid_gas().saturating_div(4))
+            .ft_transfer_from(
+                params.maker_id.clone(),
+                env::current_account_id(),
+                U128(params.amount),
+                Some("1inch Fusion+ Escrow".to_string()),
+            )
+            .then(
+                ext_self::ext(env::current_account_id())
+                    .with_static_gas(env::prepaid_gas().saturating_div(4))
+                    .on_ft_pulled_for_escrow(params, safety_deposit),
+            )
     }
 
+    /// Creates a DESTINATION escrow (e.g., ETH -> NEAR).
+    ///
     /// NEP-141 Receiver: Initiates an escrow with a Fungible Token.
     ///
-    /// To escrow a Fungible Token (like wNEAR or USDC), the user (or resolver script acting on their behalf)
+    /// To escrow a Fungible Token, the user (or resolver script acting on their behalf)
     /// does not call the contract directly. Instead, they execute a single transaction by calling
     /// the ft_transfer_call function on the token contract itself.
-    ///
-    /// This function is called by a token contract when a user executes `ft_transfer_call`.
-    /// The `safety_deposit` MUST be attached to the `ft_transfer_call` as native NEAR.
-    ///
-    /// # Arguments
-    /// - `sender_id`: The user who initiated the transfer. This is a trusted arg from the token contract.
-    /// - `amount`: The amount of FTs transferred. This is a trusted arg.
-    /// - `msg`: A JSON-serialized `FtOnTransferMsg` containing the escrow parameters.
-    ///
-    /// # Returns
-    /// A `PromiseOrValue` that returns `U128(0)` to signify we are consuming all transferred tokens.
-    /// If the logic panics, the token contract will automatically refund the FTs to the user.
     #[payable]
     pub fn ft_on_transfer(
         &mut self,
@@ -125,54 +172,45 @@ impl Contract {
         amount: U128,
         msg: String,
     ) -> PromiseOrValue<U128> {
-        // 1. Get the token contract that called this function (the asset being transferred).
+        let resolver_id = sender_id;
         let token_contract_id = env::predecessor_account_id();
-
-        // 2. Deserialize the message from the user.
-        let ft_msg: FtOnTransferMsg =
-            serde_json::from_str(&msg).expect("Invalid FtOnTransferMsg format");
-
-        // 3. Validate the timelock configuration.
-        ft_msg.timelocks.validate();
-
-        // 4. Verify the native NEAR safety deposit attached to the call.
         let safety_deposit = env::attached_deposit();
         require!(
             safety_deposit.as_yoctonear() > 0,
             "A native NEAR safety deposit must be attached"
         );
 
-        // 5. Check for hashlock collision.
-        let hashlock_bytes: EscrowId = ft_msg.hashlock.into();
+        let params: FtOnTransferMsg =
+            serde_json::from_str(&msg).expect("Invalid params format for destination escrow");
+
+        let hashlock_bytes: EscrowId = params.hashlock.into();
         require!(
             !self.escrows.contains_key(&hashlock_bytes),
             "Escrow with this hashlock already exists"
         );
 
-        // 6. Construct the Escrow object.
+        params.timelocks.validate();
+
         let escrow = Escrow {
             hashlock: hashlock_bytes,
-            maker: sender_id.clone(), // The user is the `maker`.
-            taker: ft_msg.taker,
-            asset: Asset::Ft(token_contract_id), // The asset is the contract that called us.
+            maker: params.maker_id,
+            taker: resolver_id.clone(),
+            asset: Asset::Ft(token_contract_id),
             amount: NearToken::from_yoctonear(amount.0),
             safety_deposit,
-            is_source: ft_msg.is_source,
-            timelocks: Timelocks::new(env::block_timestamp(), ft_msg.timelocks),
+            is_source: false,
+            timelocks: Timelocks::new(env::block_timestamp(), params.timelocks),
             claimed: false,
         };
 
-        // 7. Save the escrow to state.
         self.escrows.insert(hashlock_bytes, escrow);
-
         log_escrow_event(
-            "INITIATED_FT",
+            "INITIATED_DESTINATION",
             &hashlock_bytes,
-            &sender_id,
+            &resolver_id,
             NearToken::from_yoctonear(amount.0),
         );
 
-        // 8. Return U128(0) to indicate we've consumed the tokens and aren't returning any.
         PromiseOrValue::Value(U128(0))
     }
 
@@ -205,9 +243,9 @@ impl Contract {
 
         let caller = env::predecessor_account_id();
         let recipient = if escrow.is_source {
-            escrow.taker.clone() // Source: Taker/Resolver claims
+            escrow.taker.clone() // Source: Taker claims
         } else {
-            escrow.maker.clone() // Destination: Maker/User claims
+            escrow.maker.clone() // Destination: Maker claims
         };
 
         let main_transfer = match escrow.asset.clone() {
@@ -260,9 +298,9 @@ impl Contract {
 
         let caller = env::predecessor_account_id();
         let recipient = if escrow.is_source {
-            escrow.maker.clone() // Source: Maker/User gets their funds back
+            escrow.maker.clone() // Maker gets their funds back
         } else {
-            escrow.taker.clone() // Destination: Taker/Resolver gets their funds back
+            escrow.taker.clone() // Taker gets their funds back
         };
 
         let main_transfer = match escrow.asset.clone() {
@@ -287,12 +325,49 @@ impl Contract {
 
     // --- PRIVATE CALLBACKS ---
     #[private]
+    pub fn on_ft_pulled_for_escrow(
+        &mut self,
+        #[callback_result] result: Result<(), near_sdk::PromiseError>,
+        params: SignedOrder,
+        safety_deposit: NearToken,
+    ) {
+        if result.is_err() {
+            log!("FT pull failed. Refunding safety deposit and reverting nonce.");
+            Promise::new(params.taker_id).transfer(safety_deposit);
+            self.used_nonces.remove(&params.nonce);
+            panic_str("Failed to pull FTs from maker; escrow creation aborted.");
+        }
+
+        let hashlock_bytes: EscrowId = params.hashlock.into();
+        let escrow = Escrow {
+            hashlock: hashlock_bytes,
+            maker: params.maker_id,
+            taker: params.taker_id.clone(),
+            asset: Asset::Ft(params.asset_id),
+            amount: NearToken::from_yoctonear(params.amount),
+            safety_deposit,
+            is_source: params.is_source,
+            timelocks: Timelocks::new(env::block_timestamp(), params.timelocks),
+            claimed: false,
+        };
+        self.escrows.insert(hashlock_bytes, escrow);
+        log_escrow_event(
+            "INITIATED_SOURCE",
+            &hashlock_bytes,
+            &params.taker_id,
+            NearToken::from_yoctonear(params.amount),
+        );
+    }
+
+    #[private]
     pub fn on_escrow_settled(&mut self, hashlock: EscrowId) {
         if let PromiseResult::Successful(_) = env::promise_result(0) {
-            // Both transfers succeeded, we can safely remove the escrow.
-            self.escrows.remove(&hashlock);
+            // We can clear storage here in the future
+            // but I'm not sure about consequences of that
+            // let's leave it for now
+            // self.escrows.remove(&hashlock);
             env::log_str(&format!(
-                "ESCROW_CLEANUP_SUCCESS: hashlock='{}'",
+                "ESCROW_SETTLED: hashlock='{}'",
                 bs58::encode(&hashlock).into_string()
             ));
         } else {

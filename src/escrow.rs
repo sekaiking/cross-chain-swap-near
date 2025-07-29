@@ -1,4 +1,4 @@
-use near_sdk::{near, AccountId, CryptoHash, NearToken};
+use near_sdk::{json_types::Base58CryptoHash, near, AccountId, CryptoHash, NearToken};
 
 use crate::timelocks::TimelockDelays;
 
@@ -38,9 +38,7 @@ pub struct Escrow {
 // Message for ft_on_transfer to initiate an FT swap
 #[near(serializers = [json, borsh])]
 pub struct FtOnTransferMsg {
-    pub hashlock: near_sdk::json_types::Base58CryptoHash,
-    pub taker: AccountId,
+    pub hashlock: Base58CryptoHash,
+    pub maker_id: AccountId,
     pub timelocks: TimelockDelays,
-    pub is_source: bool,
-    // safety_deposit is sent as native NEAR attached to the ft_transfer_call
 }
