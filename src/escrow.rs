@@ -1,44 +1,46 @@
+use crate::timelocks::{TimelockDelays, Timelocks};
 use near_sdk::{json_types::Base58CryptoHash, near, AccountId, CryptoHash, NearToken};
 
-use crate::timelocks::TimelockDelays;
-
-use super::timelocks::Timelocks;
-
-// Unique identifier for a swap. We are using SHA256 hash of the secret.
 pub type EscrowId = CryptoHash;
 
-// NEP-141 Fungible Token or Native NEAR
 #[near(serializers = [json, borsh])]
 #[derive(Clone)]
 pub enum Asset {
-    Native,
     Ft(AccountId),
 }
 
-// All the immutable parameters of a single swap instance.
+impl Asset {
+    pub fn ft_token_id(&self) -> AccountId {
+        match self {
+            Asset::Ft(id) => id.clone(),
+        }
+    }
+}
+
 #[near(serializers = [json, borsh])]
 #[derive(Clone)]
 pub struct Escrow {
-    // Core HTLC parameters
     pub hashlock: CryptoHash,
-    pub maker: AccountId, // The initiator of the swap (the user)
-    pub taker: AccountId, // The party filling the swap (the resolver)
+    pub maker: AccountId,
+    pub taker: AccountId,
     pub asset: Asset,
     pub amount: NearToken,
-
-    // Timelock
     pub timelocks: Timelocks,
-
-    // Incentives & State
     pub safety_deposit: NearToken,
-    pub claimed: bool,   // Flag to prevent double-spends before deletion
-    pub is_source: bool, // Flag to distinguish swap direction
+    pub claimed: bool,
+    pub is_source: bool,
 }
 
-// Message for ft_on_transfer to initiate an FT swap
-#[near(serializers = [json, borsh])]
-pub struct FtOnTransferMsg {
-    pub hashlock: Base58CryptoHash,
-    pub maker_id: AccountId,
-    pub timelocks: TimelockDelays,
+/// Defines the messages passed via `ft_transfer_call`.
+#[near(serializers = [json])]
+#[serde(tag = "type")]
+pub enum FtMessage {
+    /// A simple deposit to the user's internal balance.
+    Deposit,
+    /// Creates a destination-side escrow (e.g., for an ETH -> NEAR swap).
+    CreateDestinationEscrow {
+        hashlock: Base58CryptoHash,
+        maker_id: AccountId,
+        timelocks: TimelockDelays,
+    },
 }

@@ -1,22 +1,19 @@
 use super::timelocks::TimelockDelays;
 use near_sdk::{
-    borsh::BorshSerialize, env, near, require, store::IterableSet, AccountId, PublicKey,
+    borsh::BorshSerialize, env, json_types::U128, near, require, store::IterableSet, AccountId,
+    PublicKey,
 };
 
-/// The core off-chain order signed by the maker.
-/// This struct must be serialized with a canonical format (Borsh) for the signature to be valid.
-/// It contains all parameters the maker agrees to for a single side of the swap.
+/// The core off-chain order signed by the maker for a source-side (NEAR -> Other) swap.
 #[near(serializers = [json, borsh])]
 #[derive(Clone)]
 pub struct SignedOrder {
     pub nonce: u128,
     pub maker_id: AccountId,
-    pub taker_id: AccountId,
-    pub asset_id: AccountId, // For FTs: the token contract ID. For native NEAR: `near` or this contract's ID.
-    pub amount: u128,
+    pub asset_id: AccountId,
+    pub amount: U128,
     pub hashlock: near_sdk::json_types::Base58CryptoHash,
     pub timelocks: TimelockDelays,
-    pub is_source: bool,
 }
 
 impl SignedOrder {
@@ -28,18 +25,13 @@ impl SignedOrder {
     }
 }
 
-/// Verifies that the predecessor (resolver) has a valid signature from the maker
-/// to execute the escrow creation.
+/// Verifies that the predecessor (resolver) has a valid signature from the maker.
 pub fn verify_maker_signature(
     params: &SignedOrder,
     signature_bytes: &[u8],
     public_key: &PublicKey,
     used_nonces: &mut IterableSet<u128>,
 ) {
-    require!(
-        env::predecessor_account_id() == params.taker_id,
-        "Caller is not the designated resolver"
-    );
     require!(!used_nonces.contains(&params.nonce), "Nonce already used");
 
     let message_bytes = params.to_message_bytes();

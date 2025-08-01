@@ -485,12 +485,15 @@ dependencies = [
 ]
 
 [[package]]
-name = "cross-chain-swap-near"
+name = "cross_chain_swap_near"
 version = "0.1.0"
 dependencies = [
+ "anyhow",
+ "base64 0.22.1",
  "near-sdk",
  "near-workspaces",
  "serde_json",
+ "sha2",
  "tokio",
 ]
 
